@@ -1,0 +1,203 @@
+// Code your design here
+//Async fifo Design
+
+
+//2D-FF synchronizer
+module Dff_sync #(parameter DWIDTH =3)(clk,rst,d,q);
+input clk,rst;
+input [DWIDTH-1:0] d;
+output reg [DWIDTH-1:0] q;
+
+reg [DWIDTH-1:0] meta_out;
+
+always@(posedge clk, negedge rst) begin
+	if(!rst) begin
+		q <= 0;
+		meta_out <= 0;
+	end
+	else begin
+		meta_out <= d;
+		q<= meta_out;
+	end
+end
+
+
+
+
+//Wrte pointer handler
+module wptr_hdlr #(parameter PTR_WIDTH=3)(
+input wclk,wrst_n,w_en,
+input [PTR_WIDTH:0] g_rptr_sync,
+output reg full,
+output reg [PTR_WIDTH:0] g_wptr
+);
+
+reg [PTR_WIDTH:0] b_wptr;
+
+always@(posedge wclk or negedge wrst_n) begin
+	if(!wrst_n) begin
+		b_wptr <= 0;
+		g_wptr <= 0;
+		full <= 0;
+	end
+	else if(w_en & !full) begin
+		b_wptr <= b_wptr + 1'b1;
+	end
+	else
+		b_wptr <= b_wptr;
+	end
+	
+assign g_wptr = b_wptr ^ (b_wptr >> 1);
+assign full = ( g_wptr == {~g_rptr_sync[PTR_WIDTH:PTR_WIDTH-1],g_rptr_sync[PTR_WIDTH-2:0]});	
+
+endmodule
+
+
+//Read pointer handler
+module rptr_hdlr #(parameter PTR_WIDTH=3)(
+input rclk,rrst_n,r_en,
+input [PTR_WIDTH:0] g_wptr_sync,
+output reg empty,
+output reg [PTR_WIDTH:0] g_rptr
+);
+
+reg [PTR_WIDTH:0] b_rptr;
+
+always@(posedge rclk , negedge rrst_n) begin
+	if(!rrst_n) begin
+		b_rptr <= 0;
+		empty <= 0;
+		g_rptr <= 0;
+	end
+	else if (r_en & !empty) begin
+		b_rptr <= b_rptr + 1;
+	end
+	else
+		b_rptr <= b_rptr;
+	end
+	
+assign g_rptr = b_rptr ^ (b_rptr >>1);
+assign empty = (g_rptr == g_wptr_sync);
+
+endmodule
+
+
+//Buffer memory
+module async_buffer #(parameter DWIDTH=8, PTR_WIDTH = 3)(
+input wclk,w_en,wrst_n, rclk,
+input w_en,full,empty,r_en,
+  input [DWIDTH-1:0] data_in,
+input [PTR_WIDTH-1:0] b_wptr,b_rptr,
+  output [DWIDTH-1:0] data_out
+);	
+
+parameter DEPTH = 2**PTR_WIDTH
+reg [DWIDTH-1:0] mem [0:DEPTH-1];
+
+always@(posedge wclk) begin
+	if(w_en & ~full) begin
+      mem[b_wptr[PTR_WIDTH-1:0]] <= data_in;
+	end
+	end
+
+assign data_out = ram[b_rptr[PTR_WIDTH-1:0]];
+
+endmodule
+
+
+//Top module
+module asynchronous_fifo #(parameter DEPTH=8, DATA_WIDTH=8) (
+  input wclk, wrst_n,
+  input rclk, rrst_n,
+  input w_en, r_en,
+  input [DATA_WIDTH-1:0] data_in,
+  output reg [DATA_WIDTH-1:0] data_out,
+  output reg full, empty
+);
+  
+  parameter PTR_WIDTH = $clog2(DEPTH);
+ 
+  reg [PTR_WIDTH:0] g_wptr_sync, g_rptr_sync;
+  reg [PTR_WIDTH:0] b_wptr, b_rptr;
+  reg [PTR_WIDTH:0] g_wptr, g_rptr;
+
+  wire [PTR_WIDTH-1:0] waddr, raddr;
+
+  synchronizer #(PTR_WIDTH) sync_wptr (rclk, rrst_n, g_wptr, g_wptr_sync); //write pointer to read clock domain
+  synchronizer #(PTR_WIDTH) sync_rptr (wclk, wrst_n, g_rptr, g_rptr_sync); //read pointer to write clock domain 
+  
+  wptr_handler #(PTR_WIDTH) wptr_h(wclk, wrst_n, w_en,g_rptr_sync,b_wptr,g_wptr,full);
+  rptr_handler #(PTR_WIDTH) rptr_h(rclk, rrst_n, r_en,g_wptr_sync,b_rptr,g_rptr,empty);
+  async_buffer fifom(wclk, w_en, rclk, r_en,b_wptr, b_rptr, data_in,full,empty, data_out);
+
+endmodule
+
+// Code your testbench here
+// or browse Examples
+module async_fifo_TB;
+
+  parameter DATA_WIDTH = 8;
+
+  wire [DATA_WIDTH-1:0] data_out;
+  wire full;
+  wire empty;
+  reg [DATA_WIDTH-1:0] data_in;
+  reg w_en, wclk, wrst_n;
+  reg r_en, rclk, rrst_n;
+
+  // Queue to push data_in
+  reg [DATA_WIDTH-1:0] wdata_q[$], wdata;
+
+  asynchronous_fifo as_fifo (wclk, wrst_n,rclk, rrst_n,w_en,r_en,data_in,data_out,full,empty);
+
+  always #10ns wclk = ~wclk;
+  always #35ns rclk = ~rclk;
+  
+  initial begin
+    wclk = 1'b0; wrst_n = 1'b0;
+    w_en = 1'b0;
+    data_in = 0;
+    
+    repeat(10) @(posedge wclk);
+    wrst_n = 1'b1;
+
+    repeat(2) begin
+      for (int i=0; i<30; i++) begin
+        @(posedge wclk iff !full);
+        w_en = (i%2 == 0)? 1'b1 : 1'b0;
+        if (w_en) begin
+          data_in = $urandom;
+          wdata_q.push_back(data_in);
+        end
+      end
+      #50;
+    end
+  end
+
+  initial begin
+    rclk = 1'b0; rrst_n = 1'b0;
+    r_en = 1'b0;
+
+    repeat(20) @(posedge rclk);
+    rrst_n = 1'b1;
+
+    repeat(2) begin
+      for (int i=0; i<30; i++) begin
+        @(posedge rclk iff !empty);
+        r_en = (i%2 == 0)? 1'b1 : 1'b0;
+        if (r_en) begin
+          wdata = wdata_q.pop_front();
+          if(data_out !== wdata) $error("Time = %0t: Comparison Failed: expected wr_data = %h, rd_data = %h", $time, wdata, data_out);
+          else $display("Time = %0t: Comparison Passed: wr_data = %h and rd_data = %h",$time, wdata, data_out);
+        end
+      end
+      #50;
+    end
+
+    $finish;
+  end
+  
+  initial begin 
+    $dumpfile("dump.vcd"); $dumpvars;
+  end
+endmodule
